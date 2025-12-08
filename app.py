@@ -45,6 +45,12 @@ def pdf_to_docx_page():
 def pdf_to_text_page():
     return render_template("pdf_to_text.html")
 
+# ---- PAGE: PDF Merge ----
+@app.route("/pdf-merge")
+def pdf_merge_page():
+    # simple page route (you will create pdf_merge.html later)
+    return render_template("pdf_merge.html")
+
 
 
 
@@ -380,7 +386,94 @@ def pdf_to_text_convert():
     )
 
 
+@app.route("/merge", methods=["POST"])
+def merge_pdfs():
+    """
+    Merge uploaded PDF files into a single PDF and return it as attachment.
+    Accepts:
+      - multiple files under form field name 'pdf_files[]' (preferred)
+      - OR two single fields 'pdf1' and 'pdf2' (for simple forms)
+    """
+    # Try to get list-style upload first (common when using <input multiple>)
+    files = request.files.getlist('pdf_files[]')
+    # Fallback: check individual fields if nothing in list
+    if (not files or len([f for f in files if f and f.filename]) == 0):
+        files = []
+        f1 = request.files.get('pdf1')
+        f2 = request.files.get('pdf2')
+        if f1 and f1.filename:
+            files.append(f1)
+        if f2 and f2.filename:
+            files.append(f2)
 
+    if not files or len(files) == 0:
+        abort(400, "No PDF files uploaded for merging")
+
+    # Limit number of files to something sane (avoid abuse)
+    MAX_FILES = 50
+    if len(files) > MAX_FILES:
+        abort(400, f"Too many files. Maximum allowed is {MAX_FILES}.")
+
+    writer = PdfWriter()
+    # Keep track to ensure at least one valid PDF processed
+    processed_any = False
+
+    try:
+        for f in files:
+            if not f or not getattr(f, "filename", ""):
+                continue
+            filename = secure_filename(f.filename)
+            if not filename.lower().endswith('.pdf'):
+                abort(400, f"Unsupported file type (not a PDF): {filename}")
+
+            # read file bytes into memory (stream may already be at EOF if read elsewhere)
+            file_bytes = f.read()
+            if not file_bytes:
+                # skip empty uploads but continue if others exist
+                continue
+
+            try:
+                reader = PdfReader(io.BytesIO(file_bytes))
+            except Exception as e:
+                abort(400, f"Invalid PDF '{filename}': {e}")
+
+            # append all pages
+            for page in reader.pages:
+                writer.add_page(page)
+            processed_any = True
+
+        if not processed_any:
+            abort(400, "No valid PDF content found in uploads")
+
+        # write merged PDF to memory
+        out_buffer = io.BytesIO()
+        writer.write(out_buffer)
+        out_buffer.seek(0)
+
+        # optional: create a combined filename (based on first file)
+        base_name = os.path.splitext(secure_filename(files[0].filename))[0] if files else "merged"
+        download_name = f"{base_name}_merged.pdf"
+
+        return send_file(
+            out_buffer,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=download_name
+        )
+
+    except Exception as e:
+        # catch-all: return 500 with message
+        abort(500, f"Failed to merge PDFs: {e}")
+    finally:
+        # ensure we don't leave any open file handles (Flask/Werkzeug wraps streams)
+        try:
+            for f in files:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
